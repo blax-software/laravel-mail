@@ -86,8 +86,23 @@ class ImapPoller implements Poller
                 $query = $query->all();
             }
 
+            // imapengine fetches `uid()` + `size()` only by default — the
+            // RFC822 head / body / flags are opt-in via these toggles, and
+            // *all* the message accessors (`from()`, `subject()`, `text()`,
+            // `html()`, `headers()`, `attachments()`, …) silently return
+            // null/empty when their underlying fetch wasn't requested. We
+            // need every field down-chain, so opt into headers + body +
+            // body structure (the BODYSTRUCTURE is what `attachments()`
+            // walks). `withFlags()` keeps `isSeen()`-style checks working
+            // for callers that read flags off the persisted row.
             $limit = (int) config('blax-mail.imap.fetch_limit', 200);
-            $messages = $query->limit($limit)->get();
+            $messages = $query
+                ->withHeaders()
+                ->withBody()
+                ->withBodyStructure()
+                ->withFlags()
+                ->limit($limit)
+                ->get();
 
             $highWater = $lastUid;
             foreach ($messages as $imapMessage) {
