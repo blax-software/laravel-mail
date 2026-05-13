@@ -178,12 +178,18 @@ class ImapPoller implements Poller
      */
     protected function persist(MailboxModel $mailbox, $imapMessage): ?MailMessage
     {
-        // `imapengine` exposes the headers via property-access — the
-        // raw header value carries `<>` brackets which we strip so
-        // threading queries against `mail_messages.message_id` match.
-        $messageId = $this->normalizeHeaderId($imapMessage->messageId() ?? '');
-        $inReplyTo = $this->normalizeHeaderId($imapMessage->headers()->get('In-Reply-To')?->value() ?? '');
-        $references = trim((string) ($imapMessage->headers()->get('References')?->value() ?? ''));
+        // Pull threading IDs through the Message's dedicated accessors,
+        // not via `headers()->get()` — `headers()` returns a plain array
+        // of ZBateson parser objects (no `->get()`), and `inReplyTo()` +
+        // `header()` already do the right header lookup + decoding for
+        // us. `messageId()` / `inReplyTo()` come back un-bracketed; the
+        // normalizer re-applies `<…>` so the canonical comparison key
+        // matches what the threader writes for outbound rows.
+        $messageId = $this->normalizeHeaderId((string) ($imapMessage->messageId() ?? ''));
+        $inReplyToRaw = $imapMessage->inReplyTo();
+        $inReplyToFirst = is_array($inReplyToRaw) ? ($inReplyToRaw[0] ?? '') : (string) $inReplyToRaw;
+        $inReplyTo = $this->normalizeHeaderId((string) $inReplyToFirst);
+        $references = trim((string) ($imapMessage->header('References') ?? ''));
 
         if ($messageId === '') {
             // No Message-ID is rare-but-legal; synthesize one so the
@@ -218,9 +224,13 @@ class ImapPoller implements Poller
                 'to' => array_column($to, 'address'),
                 'cc' => array_column($cc, 'address'),
                 'bcc' => array_column($bcc, 'address'),
-                'received_at' => $imapMessage->date()?->toIso8601String()
-                    ? \Carbon\Carbon::parse($imapMessage->date())
-                    : now(),
+                // `date()` already returns a Carbon instance — re-parsing
+                // it via `Carbon::parse(Carbon)` is a no-op but more
+                // importantly the prior guard (`?->toIso8601String()
+                // ? parse : now()`) was always-true for any non-null
+                // Carbon, so the ternary was just obscuring the simple
+                // null-coalesce we actually want here.
+                'received_at' => $imapMessage->date() ?? now(),
                 'meta' => [
                     'imap_uid' => $imapMessage->uid(),
                 ],
@@ -340,11 +350,24 @@ class ImapPoller implements Poller
 
     protected function serializeHeaders($imapMessage): array
     {
+        // `headers()` returns ZBateson parser instances (AddressHeader,
+        // GenericHeader, …) whose public API is `getName()` /
+        // `getValue()` / `getRawValue()` — not the `name()` / `value()`
+        // shortcut on imapengine's own header type. We probe `getName()`
+        // first (covers every ZBateson subclass) and fall back to
+        // `name()` if a future imapengine version swaps the parser.
         $out = [];
-        foreach ($imapMessage->headers() as $header) {
-            $name = method_exists($header, 'name') ? $header->name() : null;
-            $value = method_exists($header, 'value') ? $header->value() : null;
-            if ($name === null) {
+        foreach ((array) $imapMessage->headers() as $header) {
+            if (method_exists($header, 'getName')) {
+                $name = $header->getName();
+                $value = method_exists($header, 'getValue') ? $header->getValue() : null;
+            } elseif (method_exists($header, 'name')) {
+                $name = $header->name();
+                $value = method_exists($header, 'value') ? $header->value() : null;
+            } else {
+                continue;
+            }
+            if (! $name) {
                 continue;
             }
             $out[$name] = $value;
