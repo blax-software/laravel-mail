@@ -51,6 +51,16 @@ class TrackingController
                 'user_agent' => substr((string) $request->userAgent(), 0, 255),
                 'ip' => $request->ip(),
             ]);
+            // Denormalize the open onto the message row itself so
+            // list views / "Geöffnet am …" badges resolve from one
+            // column read. The `events` table still records every
+            // individual hit for forensic / per-IP analysis.
+            $now = now();
+            $message->forceFill([
+                'first_opened_at' => $message->first_opened_at ?? $now,
+                'last_opened_at' => $now,
+                'open_count' => (int) ($message->open_count ?? 0) + 1,
+            ])->save();
             MailOpened::dispatch($message, $request->userAgent(), $request->ip());
         }
 

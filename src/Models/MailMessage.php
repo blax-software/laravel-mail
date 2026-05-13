@@ -53,6 +53,14 @@ class MailMessage extends Model
         'sent_at',
         'received_at',
         'read_at',
+        // Denormalized open-tracking counters. The audit log
+        // (`mail_events`) is still the source of truth for every
+        // individual hit; these three columns let `RelatedMailList` /
+        // dashboards / queries answer "did the recipient open it?"
+        // with a single column read + no `mail_events` join.
+        'first_opened_at',
+        'last_opened_at',
+        'open_count',
         'attempts',
         'last_error',
         'tracking_token',
@@ -74,6 +82,9 @@ class MailMessage extends Model
             'sent_at' => 'datetime',
             'received_at' => 'datetime',
             'read_at' => 'datetime',
+            'first_opened_at' => 'datetime',
+            'last_opened_at' => 'datetime',
+            'open_count' => 'integer',
             'attempts' => 'integer',
             'meta' => 'array',
         ];
