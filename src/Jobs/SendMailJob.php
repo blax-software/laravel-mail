@@ -119,12 +119,19 @@ class SendMailJob implements ShouldQueue
                 $mail->bcc($bcc);
             }
 
-            // Plain-text alternative (for clients that don't render HTML).
-            if ($text) {
-                $mail->text('text/plain', ['body' => $text]);
-            }
-
             $email = $mail->getSymfonyMessage();
+
+            // Plain-text alternative (for clients that don't render HTML).
+            // The Illuminate\Mail\Message `__call` proxy forwards `text()`
+            // straight to Symfony's `Email::text($body, ?$charset)`, so
+            // passing a view-style ('view-name', [data]) tuple raises a
+            // TypeError ("Argument #2 must be of type string, array
+            // given"). Reach for the Symfony email directly with the
+            // plain-text body — the html() call above already set the
+            // text/html alternative.
+            if ($text) {
+                $email->text($text);
+            }
 
             // Anchor threading by injecting the canonical Message-ID
             // we generated at dispatch — the recipient's reply will
