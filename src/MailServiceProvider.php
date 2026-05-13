@@ -12,6 +12,7 @@ use Blax\Mail\Services\ImapPoller;
 use Blax\Mail\Services\MailDispatcher;
 use Blax\Mail\Services\MailTracker;
 use Blax\Mail\Services\MessageThreader;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 
@@ -75,6 +76,38 @@ class MailServiceProvider extends ServiceProvider
         }
 
         $this->registerTrackingRoutes();
+        $this->registerPollSchedule();
+    }
+
+    /**
+     * Auto-register the `blax-mail:poll` schedule entry so consuming apps
+     * don't have to touch their own `routes/console.php` for the default
+     * "poll every minute" case. Hooks via `callAfterResolving(Schedule)`
+     * — the scheduler only resolves inside `schedule:run` / `schedule:work`,
+     * so this is effectively free for every other command + every web
+     * request.
+     *
+     * Apps that want their own cadence either:
+     *   - flip `imap.schedule_enabled = false` and schedule the command
+     *     themselves, or
+     *   - override `imap.poll_cron` (env: `BLAX_MAIL_POLL_CRON`) to a
+     *     different cron expression. The defaults (`* * * * *`, no
+     *     overlap) are tuned for typical mailbox sizes; sub-minute
+     *     polling needs a custom runner anyway since Laravel's scheduler
+     *     ticks once a minute.
+     */
+    protected function registerPollSchedule(): void
+    {
+        if (! config('blax-mail.imap.schedule_enabled', true)) {
+            return;
+        }
+        $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
+            $cron = (string) config('blax-mail.imap.poll_cron', '* * * * *');
+            $event = $schedule->command('blax-mail:poll')->cron($cron);
+            if ((bool) config('blax-mail.imap.schedule_without_overlapping', true)) {
+                $event->withoutOverlapping();
+            }
+        });
     }
 
     /**

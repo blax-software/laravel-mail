@@ -59,10 +59,28 @@ return [
         // catching up on a long-untouched mailbox.
         'fetch_limit' => (int) env('BLAX_MAIL_IMAP_FETCH_LIMIT', 200),
         // Default interval between polls, in minutes. The actual cadence
-        // is decided by the consuming app's scheduler — this value is
-        // surfaced on the `Mailbox` model so admin UIs can show "polls
-        // every N min" without re-reading the schedule.
-        'default_interval_minutes' => (int) env('BLAX_MAIL_IMAP_INTERVAL', 5),
+        // is decided by `poll_cron` below — this value is surfaced on the
+        // `Mailbox` model so admin UIs can show "polls every N min"
+        // without re-reading the schedule.
+        'default_interval_minutes' => (int) env('BLAX_MAIL_IMAP_INTERVAL', 1),
+        // Whether the package auto-registers `blax-mail:poll` on the
+        // consuming app's scheduler. When false the consuming app
+        // schedules it manually (`routes/console.php`). When true the
+        // package boots a single `cron(poll_cron)` entry on the host
+        // scheduler. Per-mailbox enable/disable still lives on the
+        // `Mailbox` row.
+        'schedule_enabled' => env('BLAX_MAIL_SCHEDULE_ENABLED', true),
+        // Cron expression the auto-schedule uses when enabled. Default
+        // `* * * * *` runs every minute — `blax-mail:poll` is cheap
+        // (one IMAP fetch per enabled mailbox, capped by `fetch_limit`),
+        // so sub-five-minute polling is fine. Override per environment
+        // when bandwidth or rate-limits matter.
+        'poll_cron' => env('BLAX_MAIL_POLL_CRON', '* * * * *'),
+        // When true, overlapping schedule invocations are prevented via
+        // Laravel's mutex — a long-running poll won't queue up a
+        // second instance behind it. Disable only if you've sized
+        // `fetch_limit` carefully and want parallel mailbox polling.
+        'schedule_without_overlapping' => env('BLAX_MAIL_SCHEDULE_NO_OVERLAP', true),
         // When true, inbound messages whose `In-Reply-To` matches an
         // existing outbound `message_id` are auto-linked into the same
         // thread. Disable for apps that prefer to do their own threading
