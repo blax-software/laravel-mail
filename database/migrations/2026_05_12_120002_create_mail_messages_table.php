@@ -49,9 +49,16 @@ return new class extends Migration
             $table->string('direction', 10);  // MailDirection enum
             $table->string('status', 20);     // MailStatus enum
 
-            // Threading (RFC 5322)
-            $table->string('message_id', 998)->nullable();
-            $table->string('in_reply_to', 998)->nullable();
+            // Threading (RFC 5322).
+            //
+            // The RFC's 998-char ceiling is the *header line* limit, not
+            // the Message-ID length — real-world IDs are 30–200 chars, so
+            // varchar(255) is comfortable headroom and stays inside
+            // MySQL's 3072-byte per-index limit under utf8mb4 (255*4 =
+            // 1020 bytes). Going wider trips the index creation with
+            // "Specified key was too long".
+            $table->string('message_id', 255)->nullable();
+            $table->string('in_reply_to', 255)->nullable();
             // `references` can carry every Message-ID up the chain;
             // stored as longText because long-running threads can blow
             // past the typical varchar length.
