@@ -102,7 +102,9 @@ class SendMailJob implements ShouldQueue
 
         $sender = Mail::mailer($mailerName);
 
-        $sender->html($body, function (Message $mail) use ($message, $mailbox, $text, $messageId, $extraHeaders, $replyTo) {
+        $attachments = $this->outbound->attachments;
+
+        $sender->html($body, function (Message $mail) use ($message, $mailbox, $text, $messageId, $extraHeaders, $replyTo, $attachments) {
             $mail->from($mailbox->email, $mailbox->from_name ?? config('blax-mail.outbound.default_from_name'));
             if ($replyTo) {
                 $mail->replyTo($replyTo);
@@ -120,6 +122,38 @@ class SendMailJob implements ShouldQueue
             }
 
             $email = $mail->getSymfonyMessage();
+
+            // Attachments from the OutboundMail DTO. Supports three
+            // shapes:
+            //   • inline (`contentId !== null`) → `embedFromPath` or
+            //     `embed` so HTML bodies can reference `cid:<id>`
+            //     images
+            //   • path mode (preferred for files on disk — avoids the
+            //     queue serializer choking on raw binary)
+            //   • bytes mode (for in-memory blobs like generated PDFs
+            //     that don't exist on the filesystem)
+            // Without this loop the whole attachments array got
+            // silently dropped — composer-side attach worked, send
+            // didn't.
+            foreach ($attachments as $att) {
+                $options = [];
+                if ($att->mimeType) {
+                    $options['mime'] = $att->mimeType;
+                }
+                if ($att->isInline()) {
+                    if ($att->path !== null) {
+                        $email->embedFromPath($att->path, $att->filename, $att->mimeType);
+                    } elseif ($att->bytes !== null) {
+                        $email->embed($att->bytes, $att->filename, $att->mimeType);
+                    }
+                    continue;
+                }
+                if ($att->path !== null) {
+                    $mail->attach($att->path, array_merge(['as' => $att->filename], $options));
+                } elseif ($att->bytes !== null) {
+                    $mail->attachData($att->bytes, $att->filename, $options);
+                }
+            }
 
             // Plain-text alternative (for clients that don't render HTML).
             // The Illuminate\Mail\Message `__call` proxy forwards `text()`
