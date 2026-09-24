@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Blax\Mail\Services;
 
 use Blax\Mail\Contracts\Dispatcher;
+use Blax\Mail\DTOs\OutboundAttachment;
 use Blax\Mail\DTOs\OutboundMail;
 use Blax\Mail\Enums\MailDirection;
 use Blax\Mail\Enums\MailEventType;
@@ -16,6 +17,7 @@ use Blax\Mail\Models\MailEvent;
 use Blax\Mail\Models\MailMessage;
 use Blax\Mail\Models\MailRecipient;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -27,8 +29,12 @@ use Illuminate\Support\Str;
  *   2. Inject the tracking pixel into `bodyHtml`.
  *   3. Persist a `MailMessage` row (status `Queued`) inside a
  *      transaction along with one `MailRecipient` per address.
- *   4. Log a `MailEvent::Queued` and fire `OutboundMailQueued`.
- *   5. Enqueue `SendMailJob` so the actual SMTP send happens off the
+ *   4. Log a `MailEvent::Queued`.
+ *   5. Record one `MailAttachment` row per `OutboundAttachment`
+ *      (metadata only — see `recordAttachments()`), unless
+ *      `outbound.record_attachments` is off.
+ *   6. Fire `OutboundMailQueued`.
+ *   7. Enqueue `SendMailJob` so the actual SMTP send happens off the
  *      request thread.
  *
  * The job is responsible for status transitions (`Sending` → `Sent` →
@@ -47,8 +53,7 @@ class MailDispatcher implements Dispatcher
 {
     public function __construct(
         protected MailTracker $tracker,
-    ) {
-    }
+    ) {}
 
     public function dispatch(OutboundMail $mail): MailMessage
     {
@@ -103,6 +108,10 @@ class MailDispatcher implements Dispatcher
             return $row;
         });
 
+        if ((bool) config('blax-mail.outbound.record_attachments', true)) {
+            $this->recordAttachments($message, $mail);
+        }
+
         OutboundMailQueued::dispatch($message);
 
         // Hand off to the queue. The job receives the persisted id +
@@ -125,6 +134,49 @@ class MailDispatcher implements Dispatcher
         $unique = bin2hex(random_bytes(16));
 
         return '<'.$unique.'@'.$domain.'>';
+    }
+
+    /**
+     * One `mail_attachments` row per `OutboundAttachment` so the read
+     * side (`with('attachments')`, `GetThreadQuery`) shows what went
+     * out. Bookkeeping only — the bytes still travel inside the queued
+     * `SendMailJob`, and `storage_disk` / `storage_path` stay null on
+     * purpose: the file belongs to whoever built the DTO (a generated
+     * invoice PDF, a laravel-files record, a logo on disk) and
+     * `blax-mail:cleanup` deletes whatever those two columns point at.
+     *
+     * Runs after the message transaction committed and never throws:
+     * a row we cannot record is logged and skipped so the mail is
+     * queued exactly as it was before this bookkeeping existed.
+     */
+    protected function recordAttachments(MailMessage $row, OutboundMail $mail): void
+    {
+        foreach ($mail->attachments as $attachment) {
+            try {
+                $this->recordAttachment($row, $attachment);
+            } catch (\Throwable $e) {
+                Log::warning("Mail {$row->getKey()}: could not record attachment '{$attachment->filename}': {$e->getMessage()}");
+            }
+        }
+    }
+
+    protected function recordAttachment(MailMessage $row, OutboundAttachment $attachment): void
+    {
+        $bytes = $attachment->bytes;
+        $path = $attachment->path;
+        $onDisk = $path !== null && is_file($path) && is_readable($path);
+
+        $row->attachments()->create([
+            'filename' => $attachment->filename,
+            'mime_type' => $attachment->mimeType,
+            'size_bytes' => $bytes !== null ? strlen($bytes) : ($onDisk ? (int) filesize($path) : 0),
+            'storage_disk' => null,
+            'storage_path' => null,
+            'content_id' => $attachment->contentId,
+            'inline' => $attachment->isInline(),
+            'checksum' => $bytes !== null ? hash('sha256', $bytes) : ($onDisk ? hash_file('sha256', $path) : null),
+            'meta' => array_filter(['source' => 'outbound', 'path' => $path]),
+        ]);
     }
 
     protected function persistRecipients(MailMessage $row, OutboundMail $mail): void

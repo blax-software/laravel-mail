@@ -120,6 +120,14 @@ return [
         // transactional types where click tracking is forbidden
         // (password-reset URLs, bounce-handler endpoints).
         'click_tracking' => env('BLAX_MAIL_CLICK_TRACKING', true),
+        // Persist one `mail_attachments` row (filename, mime, size,
+        // sha256) per OutboundAttachment when a mail is dispatched, so
+        // the read side (`with('attachments')`, GetThreadQuery) shows
+        // what was sent. Metadata only: `storage_disk` / `storage_path`
+        // stay null because the file belongs to whoever built the DTO
+        // — `blax-mail:cleanup` never deletes it. The bytes still travel
+        // in the queued SendMailJob exactly as before.
+        'record_attachments' => env('BLAX_MAIL_RECORD_ATTACHMENTS', true),
     ],
 
     /*

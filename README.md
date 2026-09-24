@@ -47,6 +47,7 @@ Per-mailbox SMTP + IMAP, threaded message storage, open / click tracking, CQRS r
 - **3 tries, 60 / 300 second backoff** on transport errors. Terminal failures flip the row to `Failed` and fire `OutboundMailFailed`.
 - **Idempotent re-runs** — a queued job whose row is already `Sent` / `Delivered` returns early instead of double-sending.
 - **Custom headers, attachments, `Reply-To`, `In-Reply-To`** all first-class on the `OutboundMail` DTO.
+- **Outbound attachments recorded** — one `mail_attachments` row per `OutboundAttachment` (filename, mime, size, sha256) so the read side shows what was sent. Metadata only; the file itself is never copied or deleted by the package.
 
 ### Inbound
 
@@ -131,6 +132,7 @@ return [
         'default_from_name' => env('BLAX_MAIL_DEFAULT_FROM_NAME', config('app.name')),
         'list_unsubscribe'  => env('BLAX_MAIL_LIST_UNSUBSCRIBE', true),
         'click_tracking'    => env('BLAX_MAIL_CLICK_TRACKING', true),
+        'record_attachments' => env('BLAX_MAIL_RECORD_ATTACHMENTS', true),
     ],
 
     'retention' => [
@@ -238,19 +240,45 @@ new OutboundMail(
 
 One of `bodyHtml` or `bodyText` is required. The DTO is `final` + readonly — pass it to `MailDispatcher::dispatch()` and that's it.
 
+### Attachments
+
+`OutboundAttachment` takes exactly one of `bytes` (in-memory blobs such as a generated PDF) or `path` (an absolute path on the app server). `contentId` marks it inline for `cid:` references from `bodyHtml`.
+
+```php
+use Blax\Mail\DTOs\OutboundAttachment;
+
+attachments: [
+    new OutboundAttachment(filename: '2026-00001.pdf', bytes: $pdf, mimeType: 'application/pdf'),
+    new OutboundAttachment(filename: 'logo.png', path: public_path('logo.png'), mimeType: 'image/png', contentId: 'logo'),
+],
+```
+
+The bytes travel inside the queued `SendMailJob` — that is what gets attached to the SMTP message. On top of that `dispatch()` records one `MailAttachment` row per attachment (`outbound.record_attachments`, default `true`) so `$message->attachments`, `GetThreadQuery` and `ListMessagesQuery` show what was sent:
+
+| Column | Outbound value |
+|---|---|
+| `filename`, `mime_type`, `content_id`, `inline` | straight from the DTO |
+| `size_bytes` | `strlen($bytes)`, or `filesize($path)` when the path is readable, else `0` |
+| `checksum` | sha256 of the bytes / the file, `null` when the path is unreadable |
+| `storage_disk`, `storage_path` | **always `null`** |
+| `meta` | `['source' => 'outbound', 'path' => $path]` (`path` only in path mode) |
+
+`storage_*` stay null on purpose: the file belongs to whoever built the DTO (laravel-files, laravel-invoicing, a public asset), and `blax-mail:cleanup` deletes whatever those two columns point at. `MailAttachment::bytes()` / `isAvailable()` therefore return `null` / `false` for outbound rows — read the file from its owner. Recording never blocks a send: a row that cannot be written is logged as a warning and skipped. Set `BLAX_MAIL_RECORD_ATTACHMENTS=false` to keep the pre-existing behaviour (job payload only).
+
 ### What `dispatch()` does
 
-1. Builds an inbound `MailMessage` row with status `Queued`, a generated `Message-ID`, the canonical body, recipients, attachments, and a tracking token.
+1. Builds an outbound `MailMessage` row with status `Queued`, a generated `Message-ID`, the canonical body, recipients, and a tracking token.
 2. Logs a `MailEvent` of type `Queued`.
-3. Fires `OutboundMailQueued`.
-4. Queues `SendMailJob` with the row's id + the DTO.
+3. Records one `MailAttachment` row per `OutboundAttachment` (see [Attachments](#attachments)).
+4. Fires `OutboundMailQueued`.
+5. Queues `SendMailJob` with the row's id + the DTO.
 
 When the job runs, it:
 
-5. Builds a transient Laravel mailer using the `Mailbox`'s SMTP credentials (mailer name is `blax-mail-<mailbox-id>` — concurrent sends from different mailboxes don't fight over the same config key).
-6. Sends through Symfony Mailer, stamps the canonical `Message-ID`, injects the tracking pixel + link rewrites.
-7. On success: row → `Sent`, fires `OutboundMailSent`.
-8. On all retries exhausted: row → `Failed`, fires `OutboundMailFailed`.
+6. Builds a transient Laravel mailer using the `Mailbox`'s SMTP credentials (mailer name is `blax-mail-<mailbox-id>` — concurrent sends from different mailboxes don't fight over the same config key).
+7. Sends through Symfony Mailer, stamps the canonical `Message-ID`, injects the tracking pixel + link rewrites, attaches every `OutboundAttachment`.
+8. On success: row → `Sent`, fires `OutboundMailSent`.
+9. On all retries exhausted: row → `Failed`, fires `OutboundMailFailed`.
 
 ## Receiving mail
 
@@ -370,7 +398,7 @@ $msg = app(FindMessageByMessageIdQuery::class)
 | `Blax\Mail\Models\Mailbox` | `mailboxes` | Per-identity SMTP + IMAP config + watermark |
 | `Blax\Mail\Models\MailMessage` | `mail_messages` | One row per sent / received message |
 | `Blax\Mail\Models\MailRecipient` | `mail_recipients` | Normalized address-per-row for indexed `forSubject` lookups |
-| `Blax\Mail\Models\MailAttachment` | `mail_attachments` | Filename, mime, size, storage path |
+| `Blax\Mail\Models\MailAttachment` | `mail_attachments` | Filename, mime, size, sha256; storage disk + path for downloaded inbound files (null for outbound) |
 | `Blax\Mail\Models\MailEvent` | `mail_events` | Audit log: `Queued` / `Sent` / `Opened` / `Clicked` / … |
 
 `MailMessage` also exposes:
